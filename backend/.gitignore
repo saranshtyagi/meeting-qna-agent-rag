@@ -1,0 +1,125 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+.history/
+
+# =========================
+# JetBrains
+# =========================
+.idea/
+
+# =========================
+# macOS / Windows
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Python Testing / Coverage
+# =========================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Build
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# SQLite Database
+# (Ignore generated DB files)
+# =========================
+*.db
+*.sqlite3
+
+# If you want to keep an empty database schema,
+# comment the above and ignore only this:
+# meeting_assistant.db
+
+# =========================
+# Vector Database
+# Generated embeddings
+# =========================
+vector_db/
+chroma_db/
+faiss_index/
+*.faiss
+*.pkl
+
+# =========================
+# Temporary Files
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# Uploaded Audio/Videos
+# (if applicable)
+# =========================
+uploads/
+audio/
+videos/
+recordings/
+
+# =========================
+# Transcripts & Generated Files
+# =========================
+transcripts/
+summaries/
+exports/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Secrets
+# =========================
+*.pem
+*.key
+*.crt
+meeting_assistant.db
