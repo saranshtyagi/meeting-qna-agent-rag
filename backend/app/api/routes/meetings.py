@@ -1,0 +1,74 @@
+from pathlib import Path
+import shutil
+import tempfile
+
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
+
+from app.schemas.meeting import MeetingResponse
+from app.services.meeting_service import MeetingService
+from fastapi import Depends
+from sqlalchemy.orm import Session
+
+from app.db.dependencies import get_db
+
+
+router = APIRouter(
+    prefix="/meetings",
+    tags=["Meetings"],
+)
+
+
+@router.post(
+    "",
+    response_model=MeetingResponse,
+)
+async def analyze_meeting(
+
+    db: Session = Depends(get_db),
+
+    youtube_url: str | None = Form(default=None),
+
+    file: UploadFile | None = File(default=None),
+
+):
+    service = MeetingService(db)
+
+    if youtube_url is None and file is None:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either a YouTube URL or an audio file.",
+        )
+
+    if youtube_url and file:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Provide only one input.",
+        )
+
+    if youtube_url:
+
+        return service.process(youtube_url)
+
+    suffix = Path(file.filename).suffix
+
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix,
+    ) as temp:
+
+        shutil.copyfileobj(
+            file.file,
+            temp,
+        )
+
+        temp_path = temp.name
+
+    return service.process(temp_path)
