@@ -1,0 +1,207 @@
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+
+from sqlalchemy.orm import Session
+
+from app.schemas.meeting import MeetingResponse
+from app.schemas.analysis import MeetingAnalysis
+
+from app.db.models import Meeting
+from app.repositories.meeting_repository import MeetingRepository
+
+from app.utils.audio_processor import process_input
+
+from app.core.transcriber import transcribe_all
+from app.core.summarize import summarize, generate_title
+from app.core.extractor import (
+    extract_action_items,
+    extract_key_decisions,
+    extract_questions,
+)
+from app.core.vector_store import build_vector_store
+
+
+class MeetingService:
+
+    def __init__(self, db: Session):
+        self.repository = MeetingRepository(db)
+
+    # ==========================================================
+    # Public API
+    # ==========================================================
+
+    def process(self, source: str) -> MeetingResponse:
+
+        meeting_id = str(uuid.uuid4())
+
+        print(f"\nProcessing Meeting {meeting_id}")
+
+        # Step 1 - Prepare Audio
+        chunks = self._prepare_audio(source)
+
+        # Step 2 - Transcribe
+        transcript = self._transcribe(chunks)
+
+        # Step 3 - Run AI Analysis + Build Vector Store in Parallel
+        with ThreadPoolExecutor(max_workers=2) as executor:
+
+            analysis_future = executor.submit(
+                self._analyze,
+                transcript,
+            )
+
+            vector_future = executor.submit(
+                self._build_vector_store,
+                meeting_id,
+                transcript,
+            )
+
+            analysis = analysis_future.result()
+
+            # Raise exception if vector store creation fails
+            vector_future.result()
+
+        # Step 4 - Save to SQLite
+        self._save_meeting(
+            meeting_id,
+            analysis,
+        )
+
+        # Step 5 - Return API Response
+        return self._create_response(
+            meeting_id,
+            analysis,
+        )
+
+    # ==========================================================
+    # Pipeline
+    # ==========================================================
+
+    def _prepare_audio(self, source: str):
+        return process_input(source)
+
+    def _transcribe(self, chunks):
+        return transcribe_all(chunks)
+
+    def _analyze(self, transcript: str) -> MeetingAnalysis:
+
+        results = self._run_parallel_tasks(transcript)
+
+        return MeetingAnalysis(
+            title=results["title"],
+            transcript=transcript,
+            summary=results["summary"],
+            action_items=results["action_items"],
+            key_decisions=results["key_decisions"],
+            open_questions=results["open_questions"],
+        )
+
+    def _run_parallel_tasks(self, transcript: str):
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+
+            futures = {
+
+                "title": executor.submit(
+                    generate_title,
+                    transcript,
+                ),
+
+                "summary": executor.submit(
+                    summarize,
+                    transcript,
+                ),
+
+                "action_items": executor.submit(
+                    extract_action_items,
+                    transcript,
+                ),
+
+                "key_decisions": executor.submit(
+                    extract_key_decisions,
+                    transcript,
+                ),
+
+                "open_questions": executor.submit(
+                    extract_questions,
+                    transcript,
+                ),
+            }
+
+            return {
+                key: future.result()
+                for key, future in futures.items()
+            }
+
+    def _build_vector_store(
+        self,
+        meeting_id: str,
+        transcript: str,
+    ):
+        print("Building Vector Store...")
+        build_vector_store(
+            meeting_id,
+            transcript,
+        )
+        print("Vector Store Complete.")
+
+
+    # ==========================================================
+    # Persistence
+    # ==========================================================
+
+    def _save_meeting(
+        self,
+        meeting_id: str,
+        analysis: MeetingAnalysis,
+    ):
+
+        meeting = Meeting(
+
+            id=meeting_id,
+
+            title=analysis.title,
+
+            transcript=analysis.transcript,
+
+            summary=analysis.summary,
+
+            action_items=analysis.action_items,
+
+            key_decisions=analysis.key_decisions,
+
+            open_questions=analysis.open_questions,
+
+            status="completed",
+
+        )
+
+        self.repository.create(meeting)
+
+    # ==========================================================
+    # Response Builder
+    # ==========================================================
+
+    def _create_response(
+        self,
+        meeting_id: str,
+        analysis: MeetingAnalysis,
+    ) -> MeetingResponse:
+
+        return MeetingResponse(
+
+            meeting_id=meeting_id,
+
+            title=analysis.title,
+
+            transcript=analysis.transcript,
+
+            summary=analysis.summary,
+
+            action_items=analysis.action_items,
+
+            key_decisions=analysis.key_decisions,
+
+            open_questions=analysis.open_questions,
+
+        )
