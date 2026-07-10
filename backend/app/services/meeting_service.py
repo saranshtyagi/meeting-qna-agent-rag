@@ -23,12 +23,16 @@ from fastapi import HTTPException
 
 from app.schemas.meeting_list import MeetingListResponse
 from app.schemas.meeting_detail import MeetingDetailResponse
+from app.schemas.audio import AudioProcessingResult
+from app.services.storage_service import StorageService
 
 
 class MeetingService:
 
     def __init__(self, db: Session):
         self.repository = MeetingRepository(db)
+
+        self.storage = StorageService()
 
     # ==========================================================
     # Public API
@@ -41,10 +45,10 @@ class MeetingService:
         print(f"\nProcessing Meeting {meeting_id}")
 
         # Step 1 - Prepare Audio
-        chunks = self._prepare_audio(source)
+        audio = self._prepare_audio(source)
 
         # Step 2 - Transcribe
-        transcript = self._transcribe(chunks)
+        transcript = self._transcribe(audio.chunks)
 
         # Step 3 - Run AI Analysis + Build Vector Store in Parallel
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -67,8 +71,10 @@ class MeetingService:
 
         # Step 4 - Save to SQLite
         self._save_meeting(
-            meeting_id,
-            analysis,
+            meeting_id=meeting_id,
+            analysis=analysis,
+            audio=audio,
+            source=source,
         )
 
         # Step 5 - Return API Response
@@ -158,6 +164,8 @@ class MeetingService:
         self,
         meeting_id: str,
         analysis: MeetingAnalysis,
+        audio: AudioProcessingResult,
+        source: str,
     ):
 
         meeting = Meeting(
@@ -165,6 +173,8 @@ class MeetingService:
             id=meeting_id,
 
             title=analysis.title,
+
+            youtube_url=source if source.startswith(("http://", "https://")) else None,
 
             transcript=analysis.transcript,
 
@@ -175,6 +185,11 @@ class MeetingService:
             key_decisions=analysis.key_decisions,
 
             open_questions=analysis.open_questions,
+            filename=audio.filename,
+
+            audio_path=audio.audio_path,
+
+            duration=audio.duration,
 
             status="completed",
 
@@ -246,7 +261,9 @@ class MeetingService:
         meeting_id: str,
     ):
 
-        meeting = self.repository.get_by_id(meeting_id)
+        meeting = self.repository.get_by_id(
+            meeting_id,
+        )
 
         if meeting is None:
 
@@ -255,7 +272,13 @@ class MeetingService:
                 detail="Meeting not found.",
             )
 
-        self.repository.delete(meeting)
+        self.storage.delete_meeting_assets(
+            meeting,
+        )
+
+        self.repository.delete(
+            meeting,
+        )
 
         return {
             "message": "Meeting deleted successfully."
