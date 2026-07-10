@@ -32,6 +32,8 @@ class Meeting(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    audio_path = Column(Text, nullable=True)
+
     updated_at = Column(
         DateTime,
         default=datetime.utcnow,
