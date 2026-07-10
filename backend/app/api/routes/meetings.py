@@ -16,6 +16,10 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from app.db.dependencies import get_db
+from typing import List
+from app.schemas.meeting_list import MeetingListResponse
+from app.schemas.meeting_detail import MeetingDetailResponse
+
 
 
 router = APIRouter(
@@ -23,6 +27,11 @@ router = APIRouter(
     tags=["Meetings"],
 )
 
+def get_meeting_service(
+    db: Session = Depends(get_db),
+):
+
+    return MeetingService(db)
 
 @router.post(
     "",
@@ -30,14 +39,13 @@ router = APIRouter(
 )
 async def analyze_meeting(
 
-    db: Session = Depends(get_db),
-
     youtube_url: str | None = Form(default=None),
 
     file: UploadFile | None = File(default=None),
 
+    service: MeetingService = Depends(get_meeting_service),
+
 ):
-    service = MeetingService(db)
 
     if youtube_url is None and file is None:
 
@@ -72,3 +80,42 @@ async def analyze_meeting(
         temp_path = temp.name
 
     return service.process(temp_path)
+
+@router.get(
+    "",
+    response_model=List[MeetingListResponse],
+)
+def get_all_meetings(
+
+    service: MeetingService = Depends(get_meeting_service),
+
+):
+
+    return service.get_all_meetings()
+
+@router.get(
+    "/{meeting_id}",
+    response_model=MeetingDetailResponse,
+)
+def get_meeting(
+
+    meeting_id: str,
+
+    service: MeetingService = Depends(get_meeting_service),
+
+):
+
+    return service.get_meeting(meeting_id)
+
+@router.delete(
+    "/{meeting_id}",
+)
+def delete_meeting(
+
+    meeting_id: str,
+
+    service: MeetingService = Depends(get_meeting_service),
+
+):
+
+    return service.delete_meeting(meeting_id)
