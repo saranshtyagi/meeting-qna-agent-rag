@@ -1,6 +1,7 @@
 import yt_dlp 
 from pydub import AudioSegment
 import os 
+from app.schemas.audio import AudioProcessingResult
 
 DOWNLOAD_DIR = 'downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -48,15 +49,41 @@ def chunk_audio(wav_path : str , chunk_minutes : int = 2) -> list: # int = 2 sig
     
     return chunks
 
-def process_input(source: str) -> list:
-    if source.startswith("http://") or source.startswith("https://"):
+def process_input(source: str) -> AudioProcessingResult:
+
+    if source.startswith(("http://", "https://")):
+
         print("Detected YouTube URL. Downloading audio...")
+
         wav_path = download_youtube_audio(source)
+
     else:
+
         print("Detected local file. Converting to WAV...")
+
         wav_path = convert_to_wav(source)
 
     print("Chunking audio...")
+
     chunks = chunk_audio(wav_path)
+
     print(f"Audio ready — {len(chunks)} chunk(s) created.")
-    return chunks
+
+    audio = AudioSegment.from_wav(wav_path)
+
+    duration_seconds = int(audio.duration_seconds)
+
+    minutes = duration_seconds // 60
+
+    seconds = duration_seconds % 60
+
+    return AudioProcessingResult(
+
+        filename=os.path.basename(wav_path),
+
+        audio_path=wav_path,
+
+        duration=f"{minutes}:{seconds:02d}",
+
+        chunks=chunks,
+    )
