@@ -19,6 +19,10 @@ from app.core.extractor import (
     extract_questions,
 )
 from app.core.vector_store import build_vector_store
+from fastapi import HTTPException
+
+from app.schemas.meeting_list import MeetingListResponse
+from app.schemas.meeting_detail import MeetingDetailResponse
 
 
 class MeetingService:
@@ -205,3 +209,54 @@ class MeetingService:
             open_questions=analysis.open_questions,
 
         )
+    
+    # ==========================================================
+    # Meeting History
+    # ==========================================================
+
+    def get_all_meetings(self) -> list[MeetingListResponse]:
+
+        meetings = self.repository.get_all()
+
+        return [
+            MeetingListResponse.model_validate(meeting)
+            for meeting in meetings
+        ]
+
+
+    def get_meeting(
+        self,
+        meeting_id: str,
+    ) -> MeetingDetailResponse:
+
+        meeting = self.repository.get_by_id(meeting_id)
+
+        if meeting is None:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Meeting not found.",
+            )
+
+        return MeetingDetailResponse.model_validate(meeting)
+
+
+    def delete_meeting(
+        self,
+        meeting_id: str,
+    ):
+
+        meeting = self.repository.get_by_id(meeting_id)
+
+        if meeting is None:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Meeting not found.",
+            )
+
+        self.repository.delete(meeting)
+
+        return {
+            "message": "Meeting deleted successfully."
+        }
