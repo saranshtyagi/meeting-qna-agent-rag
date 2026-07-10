@@ -123,3 +123,4 @@ exports/
 *.key
 *.crt
 meeting_assistant.db
+downloads
