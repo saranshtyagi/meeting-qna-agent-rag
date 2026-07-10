@@ -7,7 +7,7 @@ from app.core.vector_store import (
     get_retriever,
     load_vector_store,
 )
-
+import gc
 
 class ChatService:
 
@@ -19,50 +19,52 @@ class ChatService:
 
         vector_store = load_vector_store(meeting_id)
 
-        retriever = get_retriever(
-            vector_store,
-            k=4,
-        )
+        try:
+            retriever = get_retriever(
+                vector_store,
+                k=4,
+            )
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """
-                    You are an expert AI Meeting Assistant.
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """
+                        You are an expert AI Meeting Assistant.
 
-                    Answer ONLY using the meeting transcript context.
+                        Answer ONLY using the meeting transcript context.
 
-                    If the answer cannot be found in the transcript,
-                    reply:
+                        If the answer cannot be found in the transcript,
+                        reply:
 
-                    "I could not find this information in the meeting."
+                        "I could not find this information in the meeting."
 
-                    Always answer professionally and concisely.
+                        Always answer professionally and concisely.
 
-                    Meeting Context:
-                    {context}
-                    """,
-                ),
-                (
-                    "human",
-                    "{question}",
-                ),
-            ]
-        )
+                        Meeting Context:
+                        {context}
+                        """,
+                    ),
+                    ("human", "{question}"),
+                ]
+            )
 
-        chain = (
-            {
-                "context": retriever
-                | RunnableLambda(self._format_docs),
-                "question": RunnablePassthrough(),
-            }
-            | prompt
-            | get_llm()
-            | StrOutputParser()
-        )
+            chain = (
+                {
+                    "context": retriever
+                    | RunnableLambda(self._format_docs),
+                    "question": RunnablePassthrough(),
+                }
+                | prompt
+                | get_llm()
+                | StrOutputParser()
+            )
 
-        return chain.invoke(question)
+            return chain.invoke(question)
+
+        finally:
+            del vector_store
+            gc.collect()
 
     @staticmethod
     def _format_docs(docs):
