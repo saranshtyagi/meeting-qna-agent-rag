@@ -23,3 +23,6 @@ class MeetingResponse(BaseModel):
     key_decisions: str
 
     open_questions: str
+
+    class Config:
+        from_attributes = True
