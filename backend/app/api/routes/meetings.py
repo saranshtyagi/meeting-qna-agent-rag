@@ -37,7 +37,7 @@ def get_meeting_service(
     "",
     response_model=MeetingResponse,
 )
-async def analyze_meeting(
+def analyze_meeting(
 
     youtube_url: str | None = Form(default=None),
 
