@@ -1,0 +1,23 @@
+services:
+
+  backend:
+
+    build: .
+
+    container_name: meeting-assistant
+
+    ports:
+      - "8000:8000"
+
+    env_file:
+      - .env
+
+    volumes:
+
+      - ./downloads:/app/downloads
+
+      - ./uploads:/app/uploads
+
+      - ./vector_db:/app/vector_db
+
+      - ./meeting_assistant.db:/app/meeting_assistant.db
