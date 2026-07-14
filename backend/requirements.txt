@@ -1,80 +1,46 @@
-# ==========================================
-# FastAPI Backend
-# ==========================================
+# FastAPI
 fastapi
 uvicorn[standard]
 python-multipart
 
-# ==========================================
-# Environment Variables
-# ==========================================
+# Database
+sqlalchemy
+
+# Environment
 python-dotenv
 pydantic
 pydantic-settings
 
-# ==========================================
 # LangChain
-# ==========================================
 langchain
 langchain-core
 langchain-community
 langchain-text-splitters
-langchain-huggingface
-
-# ==========================================
-# LLM Provider (Mistral)
-# ==========================================
 langchain-mistralai
 
-# ==========================================
-# Speech-to-Text (Groq Whisper)
-# ==========================================
+# APIs
 groq
 
-# ==========================================
-# Embeddings
-# ==========================================
-sentence-transformers
-transformers
-torch
-
-# ==========================================
-# Vector Database
-# ==========================================
+# Vector DB
 chromadb
 
-# ==========================================
-# Audio Processing
-# ==========================================
+# Audio
 yt-dlp
 pydub
 ffmpeg-python
 
-# ==========================================
-# File Processing
-# ==========================================
+# PDFs
 pypdf
 fpdf2
 
-# ==========================================
-# HTTP & Utilities
-# ==========================================
-requests
+# HTTP
 httpx
-tqdm
-numpy
+requests
 
-# ==========================================
-# Logging & Serialization
-# ==========================================
+# Utils
+tqdm
 orjson
 
-# ==========================================
-# Testing (Recommended)
-# ==========================================
-pytest
-
-# ==========================================
 # Development
-# ==========================================
+pytest
 watchfiles
