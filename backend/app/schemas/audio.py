@@ -9,4 +9,4 @@ class AudioProcessingResult(BaseModel):
 
     duration: str
 
-    chunks: list[str]
+    # chunks: list[str]

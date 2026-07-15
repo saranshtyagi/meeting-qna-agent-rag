@@ -40,5 +40,7 @@ class Settings(BaseSettings):
         case_sensitive=True,
     )
 
+    VECTOR_BATCH_SIZE: int = 10
+
 
 settings = Settings()

@@ -1,6 +1,6 @@
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-
+import os
 from sqlalchemy.orm import Session
 
 from app.schemas.meeting import MeetingResponse
@@ -11,7 +11,7 @@ from app.repositories.meeting_repository import MeetingRepository
 
 from app.utils.audio_processor import process_input
 
-from app.core.transcriber import transcribe_all
+from app.core.transcriber import transcribe_audio
 from app.core.summarize import summarize, generate_title
 from app.core.extractor import (
     extract_action_items,
@@ -48,7 +48,14 @@ class MeetingService:
         audio = self._prepare_audio(source)
 
         # Step 2 - Transcribe
-        transcript = self._transcribe(audio.chunks)
+        transcript = self._transcribe(
+            audio.audio_path,
+        )
+
+        try:
+            os.remove(audio.audio_path)
+        except OSError:
+            pass
 
         # Step 3 - Run AI Analysis + Build Vector Store in Parallel
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -90,8 +97,13 @@ class MeetingService:
     def _prepare_audio(self, source: str):
         return process_input(source)
 
-    def _transcribe(self, chunks):
-        return transcribe_all(chunks)
+    def _transcribe(
+        self,
+        wav_path: str,
+    ):
+        return transcribe_audio(
+            wav_path,
+        )
 
     def _analyze(self, transcript: str) -> MeetingAnalysis:
 
@@ -108,7 +120,7 @@ class MeetingService:
 
     def _run_parallel_tasks(self, transcript: str):
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
 
             futures = {
 
@@ -148,12 +160,12 @@ class MeetingService:
         meeting_id: str,
         transcript: str,
     ):
-        print("Building Vector Store...")
+        
         build_vector_store(
             meeting_id,
             transcript,
         )
-        print("Vector Store Complete.")
+       
 
 
     # ==========================================================
