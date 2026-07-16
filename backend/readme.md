@@ -1,291 +1,299 @@
 # AI Meeting Assistant — Backend
 
-A FastAPI backend that turns a meeting recording (YouTube link or uploaded audio/video file) into a searchable, queryable meeting record: transcript, title, summary, action items, key decisions, open questions, and a RAG-powered Q&A chat over the transcript.
+A FastAPI backend that turns a meeting recording (or, in local dev, a YouTube link) into a searchable, structured knowledge artifact: transcript, summary, action items, key decisions, open questions, and a RAG-powered Q&A chat over the meeting content.
+
+Built for low-memory hosting (Render free tier) — audio is streamed and chunked rather than loaded wholesale, and embeddings are written in small batches to avoid OOM kills.
 
 ---
 
-## 1. What it does
+## Table of Contents
 
-Given either a **YouTube URL** or an **uploaded audio/video file**, the backend:
-
-1. Downloads/converts the source into a normalized 16kHz mono WAV file and splits it into 2-minute chunks.
-2. Transcribes every chunk with **Groq's hosted Whisper** and stitches the chunks into one transcript.
-3. Runs five LLM tasks **in parallel** (via `ThreadPoolExecutor`) against the transcript using **Mistral**:
-   - Title generation
-   - Map-reduce summary (chunked → per-chunk summary → combined bullet-point summary)
-   - Action item extraction
-   - Key decision extraction
-   - Open/unresolved question extraction
-4. **Simultaneously**, builds a per-meeting **Chroma vector store** from the transcript (chunked + embedded with a local HuggingFace sentence-transformer) so it can be queried later.
-5. Persists everything to a SQLite database (transcript, summary, analysis fields, audio metadata, timestamps).
-6. Exposes a **chat endpoint** that answers free-form questions about a specific meeting using **Retrieval-Augmented Generation** over that meeting's vector store.
-7. Exposes CRUD-style endpoints to list, fetch, and delete meetings (deleting a meeting also cleans up its vector store, audio file, and leftover chunk files on disk).
+- [Overview](#overview)
+- [Tech Stack](#tech-stack)
+- [Architecture](#architecture)
+- [Request Flow — Meeting Ingestion](#request-flow--meeting-ingestion)
+- [Request Flow — Chat / Q&A](#request-flow--chat--qa)
+- [Project Structure](#project-structure)
+- [API Reference](#api-reference)
+- [Environment Variables](#environment-variables)
+- [Running Locally](#running-locally)
+- [Deployment Notes (Render Free Tier)](#deployment-notes-render-free-tier)
+- [Known Limitations](#known-limitations)
 
 ---
 
-## 2. Tech stack
+## Overview
 
-| Concern | Library / Service |
-|---|---|
-| Web framework | FastAPI + Uvicorn |
-| Config | pydantic-settings (`.env` file) |
-| LLM orchestration | LangChain (LCEL runnables) |
-| LLM (reasoning/generation) | Mistral, via `langchain-mistralai` (`mistral-small-latest` by default) |
-| Speech-to-text | Groq-hosted Whisper (`whisper-large-v3-turbo` by default) |
-| Embeddings | HuggingFace `sentence-transformers` (`all-MiniLM-L6-v2`, CPU) |
-| Vector store | ChromaDB (one persisted collection per meeting) |
-| Relational storage | SQLite via SQLAlchemy ORM |
-| Audio handling | `yt-dlp` (YouTube download), `pydub` + `ffmpeg` (conversion/chunking) |
-| Concurrency | `concurrent.futures.ThreadPoolExecutor` |
+Given a meeting recording, the backend:
+
+1. Accepts either a **local file upload** (audio/video) or, **in local development only**, a **YouTube URL**.
+2. Converts/normalizes audio to mono 16kHz WAV via `ffmpeg`.
+3. Transcribes the audio in **2-minute chunks** using Groq-hosted Whisper (`whisper-large-v3-turbo`), streaming chunks one at a time instead of holding the full file in memory.
+4. Runs 5 LLM analysis tasks in parallel (title, summary, action items, key decisions, open questions) via Mistral, alongside vector store construction, using thread pools.
+5. Persists the meeting record to SQLite and the transcript embeddings to a per-meeting **ChromaDB** collection (batched to control memory).
+6. Exposes a **RAG chat endpoint** so a user can ask natural-language questions about any past meeting, answered strictly from that meeting's transcript context.
 
 ---
 
-## 3. Project structure
+## Tech Stack
+
+| Layer            | Technology                                   |
+|------------------|-----------------------------------------------|
+| API framework    | FastAPI + Uvicorn                             |
+| Transcription    | Groq API — `whisper-large-v3-turbo`           |
+| LLM orchestration| LangChain (LCEL chains)                       |
+| LLM provider     | Mistral (`mistral-small-latest`, `mistral-embed`) |
+| Vector store     | ChromaDB (`langchain-chroma`), per-meeting collection |
+| Relational store | SQLite via SQLAlchemy                         |
+| Audio processing | `ffmpeg` / `ffprobe` (via subprocess), `yt-dlp` |
+| Containerization | Docker (`python:3.11-slim` + ffmpeg)          |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client["Frontend (Lovable / TanStack Start)"]
+        UI[Upload UI / Chat UI]
+    end
+
+    subgraph API["FastAPI Backend"]
+        R1["/meetings (POST, GET, GET/:id, DELETE/:id)"]
+        R2["/chat (POST)"]
+        R3["/health"]
+
+        MS[MeetingService]
+        CS[ChatService]
+
+        subgraph Core["Core Pipeline"]
+            AP[audio_processor]
+            TR[transcriber]
+            SUM[summarize + extractor]
+            VS[vector_store]
+        end
+    end
+
+    subgraph External["External Services"]
+        GROQ[("Groq API<br/>Whisper Transcription")]
+        MISTRAL[("Mistral API<br/>Chat + Embeddings")]
+        YT[("YouTube<br/>(local dev only)")]
+    end
+
+    subgraph Storage["Storage"]
+        SQLITE[("SQLite<br/>meeting metadata")]
+        CHROMA[("ChromaDB<br/>per-meeting vector collections")]
+        DISK[("Local disk<br/>temp audio files")]
+    end
+
+    UI -->|upload file / ask question| R1
+    UI --> R2
+    R1 --> MS
+    R2 --> CS
+
+    MS --> AP
+    AP -.->|local dev only| YT
+    AP --> DISK
+    MS --> TR
+    TR --> GROQ
+    MS --> SUM
+    SUM --> MISTRAL
+    MS --> VS
+    VS --> MISTRAL
+    VS --> CHROMA
+    MS --> SQLITE
+
+    CS --> VS
+    CS --> MISTRAL
+```
+
+---
+
+## Request Flow — Meeting Ingestion
+
+`POST /meetings` — this is the core pipeline and the main place OOM risk was mitigated.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as Frontend
+    participant API as FastAPI /meetings
+    participant AP as audio_processor
+    participant TR as transcriber (Groq)
+    participant AN as Analysis (Mistral, parallel)
+    participant VS as vector_store (Chroma, batched)
+    participant DB as SQLite
+
+    User->>FE: Upload audio/video file (≤ 1 hr)
+    FE->>API: POST /meetings (multipart file)
+    API->>AP: process_input(file)
+    AP->>AP: ffmpeg → mono 16kHz WAV
+    AP->>AP: ffprobe → get duration
+    API->>TR: transcribe_audio(wav_path)
+
+    loop for each 2-min chunk (generator, one at a time)
+        TR->>TR: ffmpeg segment → temp chunk
+        TR->>TR: Groq Whisper transcription
+        TR->>TR: delete chunk from disk immediately
+    end
+    TR-->>API: full transcript (joined text)
+    API->>API: delete source WAV from disk
+
+    par Analysis (ThreadPoolExecutor, 3 workers)
+        API->>AN: generate_title(transcript)
+        API->>AN: summarize(transcript) — map-reduce over 3k-char chunks
+        API->>AN: extract_action_items(transcript)
+        API->>AN: extract_key_decisions(transcript)
+        API->>AN: extract_questions(transcript)
+    and Vector Store Build (parallel executor, 2 workers)
+        API->>VS: build_vector_store(meeting_id, transcript)
+        VS->>VS: split into ~500-char chunks
+        loop batches of VECTOR_BATCH_SIZE (10)
+            VS->>VS: embed batch via Mistral + add to Chroma
+        end
+    end
+
+    API->>DB: save Meeting (transcript, summary, action items, etc.)
+    API-->>FE: MeetingResponse (title, summary, action items, decisions, questions)
+    FE-->>User: Display results
+```
+
+**Where the OOM fixes live:**
+- Audio is **chunked and transcribed one piece at a time** (generator-based `iter_chunks`), each chunk deleted right after transcription — the full file is never held in memory as one blob.
+- Vector embeddings are written in **batches of `VECTOR_BATCH_SIZE` (default 10)** instead of embedding the entire transcript at once.
+- The source WAV is deleted from disk immediately after transcription completes.
+- `ChatService` explicitly `del`s the loaded vector store and calls `gc.collect()` after every chat request.
+
+---
+
+## Request Flow — Chat / Q&A
+
+`POST /chat` — RAG over a single meeting's transcript.
+
+```mermaid
+flowchart LR
+    Q[User question + meeting_id] --> LOAD["load_vector_store(meeting_id)"]
+    LOAD --> RET["retriever.get_relevant_documents(question)<br/>k=4, similarity search"]
+    RET --> FMT["Format retrieved chunks as context"]
+    FMT --> PROMPT["Build prompt:<br/>system = meeting context<br/>human = question"]
+    PROMPT --> LLM["Mistral chat completion"]
+    LLM --> ANS["Answer (grounded only in transcript;<br/>falls back to 'not found' if absent)"]
+    ANS --> CLEANUP["del vector_store + gc.collect()"]
+    CLEANUP --> RESP[Return ChatResponse]
+```
+
+---
+
+## Project Structure
 
 ```
 backend/
-├── main.py                      # FastAPI app entrypoint; creates DB tables, mounts router
+├── main.py                      # FastAPI app entrypoint, CORS config, router mounting
 ├── requirements.txt
-├── app/
-│   ├── config.py                 # Settings loaded from .env (API keys, model names, dirs)
-│   ├── api/
-│   │   ├── router.py              # Aggregates health/meetings/chat routers
-│   │   └── routes/
-│   │       ├── health.py          # GET / , GET /health
-│   │       ├── meetings.py        # POST/GET/GET-by-id/DELETE /meetings
-│   │       └── chat.py            # POST /chat
-│   ├── core/                     # LLM / AI pipeline building blocks
-│   │   ├── llm.py                 # Factory for the Mistral chat model
-│   │   ├── transcriber.py         # Groq Whisper transcription
-│   │   ├── summarize.py           # Map-reduce summary + title generation
-│   │   ├── extractor.py           # Action items / decisions / open questions chains
-│   │   ├── vector_store.py        # Chroma build/load/retriever helpers (per-meeting)
-│   │   └── rag_engine.py          # Standalone RAG chain builder (see note below)
-│   ├── services/
-│   │   ├── meeting_service.py     # Orchestrates the full pipeline end-to-end
-│   │   ├── chat_service.py        # RAG chain used by the /chat endpoint
-│   │   └── storage_service.py     # Cleans up vector store/audio/chunks on delete
-│   ├── repositories/
-│   │   └── meeting_repository.py  # SQLAlchemy CRUD for the Meeting table
-│   ├── db/
-│   │   ├── database.py            # Engine, session factory, declarative Base (SQLite)
-│   │   ├── models.py              # Meeting ORM model
-│   │   └── dependencies.py        # get_db() FastAPI dependency
-│   ├── schemas/                  # Pydantic request/response models
-│   │   ├── meeting.py, meeting_list.py, meeting_detail.py
-│   │   ├── analysis.py, audio.py, chat.py, response.py
-│   └── utils/
-│       └── audio_processor.py     # YouTube download, WAV conversion, chunking
+├── Dockerfile
+├── docker-compose.yml
+└── app/
+    ├── config.py                 # Settings (API keys, model names, batch sizes)
+    ├── api/
+    │   ├── router.py              # Aggregates all route modules
+    │   └── routes/
+    │       ├── health.py          # GET /, GET /health
+    │       ├── meetings.py        # POST/GET/DELETE /meetings
+    │       └── chat.py            # POST /chat
+    ├── services/
+    │   ├── meeting_service.py     # Orchestrates the full ingestion pipeline
+    │   ├── chat_service.py        # RAG Q&A logic
+    │   └── storage_service.py     # Cleans up files on meeting delete
+    ├── core/
+    │   ├── llm.py                 # Centralized Mistral LLM factory
+    │   ├── transcriber.py         # Groq Whisper transcription, chunk streaming
+    │   ├── summarize.py           # Map-reduce summary + title generation
+    │   ├── extractor.py           # Action items / decisions / open questions
+    │   └── vector_store.py        # Chroma build/load/retriever, batched embedding
+    ├── utils/
+    │   └── audio_processor.py     # yt-dlp download (dev), ffmpeg convert/chunk/duration
+    ├── db/
+    │   ├── database.py            # SQLAlchemy engine/session
+    │   ├── models.py               # Meeting ORM model
+    │   └── dependencies.py        # get_db dependency
+    ├── repositories/
+    │   └── meeting_repository.py  # CRUD against SQLite
+    └── schemas/                   # Pydantic request/response models
 ```
 
 ---
 
-## 4. Architecture / data flow
+## API Reference
 
-### 4.1 Ingest pipeline (`POST /meetings`)
-
-```
-Client
-  │  youtube_url  OR  file
-  ▼
-MeetingService.process(source)
-  │
-  ├─ 1. _prepare_audio(source)          → app/utils/audio_processor.py
-  │       - YouTube URL → yt-dlp download → ffmpeg extract → WAV
-  │       - Uploaded file → pydub convert → mono, 16kHz WAV
-  │       - Split into 2-minute chunks
-  │
-  ├─ 2. _transcribe(chunks)             → app/core/transcriber.py
-  │       - Each chunk sent to Groq Whisper, sequentially
-  │       - Chunks joined into one transcript string
-  │
-  ├─ 3. Parallel (ThreadPoolExecutor, 2 workers):
-  │       ├─ _analyze(transcript)       → app/core/summarize.py, extractor.py
-  │       │     - title, summary, action_items, key_decisions, open_questions
-  │       │     - (internally also parallelized, 5 workers)
-  │       └─ _build_vector_store(meeting_id, transcript) → app/core/vector_store.py
-  │             - chunk transcript (500 chars / 50 overlap)
-  │             - embed with all-MiniLM-L6-v2
-  │             - persist Chroma collection at vector_db/{meeting_id}
-  │
-  ├─ 4. _save_meeting(...)              → SQLite via MeetingRepository
-  │
-  └─ 5. Return MeetingResponse (meeting_id, title, transcript, summary,
-         action_items, key_decisions, open_questions)
-```
-
-### 4.2 Chat / Q&A pipeline (`POST /chat`)
-
-```
-Client → { meeting_id, question }
-  │
-  ▼
-ChatService.ask(meeting_id, question)
-  │
-  ├─ load_vector_store(meeting_id)   → reopen the persisted Chroma collection
-  ├─ retriever (k=4 similarity search)
-  ├─ RAG prompt: "answer ONLY from meeting context, else say you can't find it"
-  ├─ get_llm() (Mistral) | StrOutputParser()
-  └─ return ChatResponse(answer)
-```
-
-Note: `ChatService` explicitly deletes the loaded vector store object and runs `gc.collect()` in a `finally` block after each request — this looks like a deliberate workaround for Chroma/SQLite file-handle or memory issues on repeated loads.
-
-### 4.3 Delete pipeline (`DELETE /meetings/{id}`)
-
-```
-StorageService.delete_meeting_assets(meeting)
-  ├─ delete_vector_store(meeting_id)   → rmtree vector_db/{meeting_id}
-  ├─ delete_audio(audio_path)          → remove the WAV file
-  └─ delete_chunks(audio_path)         → remove {audio}_chunk_*.wav files
-```
+| Method | Endpoint          | Description                                              |
+|--------|-------------------|------------------------------------------------------------|
+| GET    | `/`               | Root health message                                        |
+| GET    | `/health`         | Health check                                                |
+| POST   | `/meetings`       | Ingest a meeting — provide **either** `file` (multipart) **or** `youtube_url` (form field, dev only) |
+| GET    | `/meetings`       | List all processed meetings (summary view)                 |
+| GET    | `/meetings/{id}`  | Full detail for one meeting (transcript, summary, etc.)    |
+| DELETE | `/meetings/{id}`  | Delete a meeting and its associated stored assets          |
+| POST   | `/chat`           | Ask a question about a specific meeting (`meeting_id`, `question`) |
 
 ---
 
-## 5. API reference
+## Environment Variables
 
-Base URL: `http://localhost:8000`
+| Variable              | Required | Default                | Notes |
+|-----------------------|----------|-------------------------|-------|
+| `GROQ_API_KEY`        | ✅       | —                        | Whisper transcription |
+| `MISTRAL_API_KEY`     | ✅       | —                        | Chat + embeddings |
+| `GROQ_WHISPER_MODEL`  | ❌       | `whisper-large-v3-turbo` | |
+| `MISTRAL_MODEL`       | ❌       | `mistral-small-latest`   | |
+| `EMBEDDING_MODEL`     | ❌       | `all-MiniLM-L6-v2`       | Declared but embeddings currently use `mistral-embed` |
+| `UPLOAD_DIR`          | ❌       | `uploads`                | |
+| `VECTOR_DB_DIR`       | ❌       | `vector_db`              | |
+| `CHROMA_COLLECTION`   | ❌       | `meeting_transcripts`    | |
+| `VECTOR_BATCH_SIZE`   | ❌       | `10`                     | Lower this further if still hitting memory limits |
 
-### Health
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/` | Root ping — returns a static welcome message |
-| GET | `/health` | Returns `{"status": "healthy"}` |
-
-### Meetings
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/meetings` | Ingest a meeting from a YouTube URL **or** an uploaded file (multipart form). Runs the full pipeline synchronously and returns the result. |
-| GET | `/meetings` | List all meetings (id, title, status, created_at) |
-| GET | `/meetings/{meeting_id}` | Full meeting detail (transcript, summary, analysis fields, timestamps) |
-| DELETE | `/meetings/{meeting_id}` | Deletes the meeting row plus its vector store, audio file, and chunk files |
-
-**`POST /meetings` request** — exactly one of these two form fields:
-- `youtube_url` (form field, string)
-- `file` (form file, audio/video upload)
-
-Sending both, or neither, returns `400`.
-
-**`POST /meetings` response** (`MeetingResponse`):
-```json
-{
-  "meeting_id": "uuid-string",
-  "title": "string",
-  "transcript": "string",
-  "summary": "string",
-  "action_items": "string",
-  "key_decisions": "string",
-  "open_questions": "string"
-}
-```
-
-**`GET /meetings` response** (`MeetingListResponse[]`):
-```json
-[
-  { "id": "uuid", "title": "string", "status": "completed", "created_at": "2026-07-10T12:00:00" }
-]
-```
-
-**`GET /meetings/{id}` response** (`MeetingDetailResponse`): same as above list item, plus `transcript`, `summary`, `action_items`, `key_decisions`, `open_questions`, `youtube_url`, `filename`, `duration`, `updated_at`.
-
-**`DELETE /meetings/{id}` response:**
-```json
-{ "message": "Meeting deleted successfully." }
-```
-Returns `404` if the meeting doesn't exist.
-
-### Chat
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/chat` | Ask a question about a specific meeting's transcript (RAG) |
-
-**Request** (`ChatRequest`):
-```json
-{ "meeting_id": "uuid-string", "question": "What did we decide about the launch date?" }
-```
-
-**Response** (`ChatResponse`):
-```json
-{ "answer": "string" }
-```
+Set these in a `.env` file at the project root (not committed).
 
 ---
 
-## 6. Data model
-
-`Meeting` (SQLite table `meetings`):
-
-| Column | Type | Notes |
-|---|---|---|
-| id | String (PK) | UUID4, generated per meeting |
-| title | Text | LLM-generated |
-| transcript | Text | Full stitched transcript |
-| summary | Text | Map-reduce bullet summary |
-| action_items | Text | Numbered list, LLM-generated |
-| key_decisions | Text | Numbered list, LLM-generated |
-| open_questions | Text | Numbered list, LLM-generated |
-| youtube_url | Text, nullable | Set only if source was a URL |
-| filename | Text, nullable | Basename of the processed WAV |
-| audio_path | Text, nullable | Full path to the WAV file on disk |
-| duration | String, nullable | `"MM:SS"` |
-| status | String | `"completed"` (no other states currently set) |
-| created_at | DateTime | UTC, auto |
-| updated_at | DateTime | UTC, auto-updates on row update |
-
----
-
-## 7. Setup & running locally
-
-### Prerequisites
-- Python 3.10+
-- `ffmpeg` installed and on PATH (required by `pydub` / `yt-dlp` audio extraction)
-- A Groq API key (for Whisper transcription)
-- A Mistral API key (for all LLM tasks)
-
-### Install
+## Running Locally
 
 ```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+# 1. Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate   # or venv\Scripts\activate on Windows
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Set environment variables in .env
+echo "GROQ_API_KEY=your_key_here" >> .env
+echo "MISTRAL_API_KEY=your_key_here" >> .env
+
+# 4. Run the server
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Environment variables
-
-Create a `.env` file in `backend/` (this is read by `app/config.py`):
-
-```env
-GROQ_API_KEY=your_groq_key_here
-MISTRAL_API_KEY=your_mistral_key_here
-
-# Optional overrides (defaults shown)
-GROQ_WHISPER_MODEL=whisper-large-v3-turbo
-MISTRAL_MODEL=mistral-small-latest
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-UPLOAD_DIR=uploads
-VECTOR_DB_DIR=vector_db
-CHROMA_COLLECTION=meeting_transcripts
-```
-
-`GROQ_API_KEY` and `MISTRAL_API_KEY` are **required** — the app raises a `pydantic` validation error on startup if either is missing.
-
-### Run
+Or with Docker:
 
 ```bash
-uvicorn main:app --reload
+docker compose up --build
 ```
 
-The API will be available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
-
-On first run, `main.py` calls `Base.metadata.create_all(engine)`, so the SQLite file (`meeting_assistant.db`) and the `meetings` table are created automatically — no migration step needed for this stage of the project.
-
-Directories created at runtime (not committed, see `.gitignore`):
-- `downloads/` — YouTube audio downloads
-- `vector_db/{meeting_id}/` — per-meeting Chroma collections
-- WAV chunk files (`{audio}_chunk_N.wav`) next to the source audio
+In local dev, both file upload **and** YouTube URL ingestion are available. YouTube ingestion uses `yt-dlp` to download and extract audio before it enters the same chunking/transcription pipeline.
 
 ---
+
+## Deployment Notes (Render Free Tier)
+
+- **YouTube ingestion is not reliable in hosted environments.** YouTube actively blocks datacenter/bot IPs (which is what Render's free tier egresses from), so `yt-dlp` downloads frequently fail there even though they work fine locally. The frontend should disable/hide the YouTube URL option in production and only offer file upload.
+- **Audio length should be capped at ~1 hour per upload.** Longer recordings increase peak memory during conversion, chunking, and transcript accumulation, which risks OOM kills on Render's free tier (512MB RAM). This should be enforced both in the UI and ideally with a server-side duration/file-size check in `meetings.py`.
+- Memory-conscious design choices already in place: chunked/streamed transcription, immediate deletion of temp audio, batched vector embedding, and explicit garbage collection after chat requests.
+
+---
+
+## Known Limitations
+
+- No authentication/authorization on any endpoint — anyone with the URL can create, view, or delete meetings.
+- `youtube_url` ingestion has no server-side environment gate yet; it will still be attempted if called directly via the API in production (and will simply fail with an `HTTPException` from `download_youtube_audio`).
+- No enforced max file size / duration at the API layer yet — currently relies on the frontend and infra limits.
+- SQLite is single-file and not suited for concurrent multi-instance deployments; fine for a single Render instance / portfolio-scale usage.
